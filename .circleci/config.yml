@@ -1,0 +1,116 @@
+version: 2.1
+orbs:
+  slack: circleci/slack@4.10.1
+  aws-cli: circleci/aws-cli@3.1.4
+  aws-ecr: circleci/aws-ecr@7.3.0
+  aws-ecs: circleci/aws-ecs@2.3.0
+  gh: circleci/github-cli@2.2.0
+
+jobs:
+  build_lint_test:
+    docker:
+      - image: cimg/php:8.2.15
+      - image: cimg/mysql:8.0
+        environment:
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_DATABASE: laravel_test
+          MYSQL_USER: laravel
+          MYSQL_PASSWORD: laravel
+    environment:
+      DB_CONNECTION: mysql_test
+      DB_HOST: 127.0.0.1
+      MYSQL_DATABASE: laravel_test
+      APP_KEY: base64:fL/PLhXwvNsgnI/CIIL7vl+XALrKpWnGuXWy7S19KME=
+    steps:
+      - checkout
+      - restore_cache:
+          paths:
+            - ./laravel/vendor
+          keys:
+            - v1-dependencies-{{ checksum "./laravel/composer.json" }}
+            - v1-dependencies-
+      - run:
+          working_directory: laravel
+          name: Install PHP libraries
+          command: composer install -n --prefer-dist
+      - save_cache:
+          paths:
+            - ./laravel/vendor
+          key: v1-dependencies-{{ checksum "./laravel/composer.json" }}
+      # - run:
+      #     name: コードスタイルチェック (phpcs)
+      #     working_directory: laravel
+      #     command: php ./vendor/bin/phpcs ./app -n
+      # - run:
+      #     working_directory: laravel
+      #     name: Install Node libraries
+      #     command: npm ci
+      # - run:
+      #     name: コードスタイルチェック（ESlint）
+      #     working_directory: laravel
+      #     command: npm run lint
+      # - run:
+      #     name: DBの用意ができるのを待つ
+      #     working_directory: laravel
+      #     command: dockerize -wait tcp://localhost:3306
+      # - run:
+      #     name: マイグレーション
+      #     working_directory: laravel
+      #     command: php artisan migrate --force
+      # - run:
+      #     name: vite build
+      #     working_directory: laravel
+      #     command: npm run build
+      # - run:
+      #     name: テスト実行
+      #     working_directory: laravel
+      #     command: php artisan test
+
+workflows:
+  version: 2
+  test_and_deploy:
+    jobs:
+      - build_lint_test
+      - aws-ecr/build-and-push-image:
+          name: push_web_image_prod
+          requires:
+            - build_lint_test
+          region: AWS_REGION
+          account-url: AWS_ECR_ACCOUNT_URL
+          repo: 'alive-monitoring-web'
+          tag: "latest"
+          context: alive-monitoring
+          dockerfile: infra/docker/production/nginx/Dockerfile
+          filters: 
+            branches:
+              only:
+              - master
+      - aws-ecr/build-and-push-image:
+          name: push_app_image_prod
+          requires:
+            - build_lint_test
+          region: AWS_REGION
+          account-url: AWS_ECR_ACCOUNT_URL
+          repo: 'alive-monitoring-app'
+          tag: "latest"
+          context: alive-monitoring
+          dockerfile: infra/docker/production/php/Dockerfile
+          filters: 
+            branches:
+              only:
+              - master
+      - aws-ecs/deploy-service-update:
+          name: prod-deploy
+          context: alive-monitoring
+          requires:
+            - push_web_image_prod
+            - push_app_image_prod
+          family: "example"
+          service-name: "example"
+          cluster-name: "example"
+          force-new-deployment: true
+          skip-task-definition-registration: true
+          filters:
+            branches:
+              only:
+                - master
